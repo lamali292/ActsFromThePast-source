@@ -1,0 +1,271 @@
+﻿using Godot;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
+
+namespace ActsFromThePast;
+
+public partial class InteractableTorchEffect : Control
+{
+    public enum TorchSize
+    {
+        S,
+        M,
+        L
+    }
+
+    private const string LOG_TAG = "[ActsFromThePast]";
+    private const string AtlasPath = AtlasRegions.Vfx;
+    private const float ParticleEmitInterval = 0.1f;
+
+    public static bool RenderGreen = false;
+    private readonly List<LightFlareLEffect> _flaresL = [];
+    private readonly List<LightFlareMEffect> _flaresM = [];
+    private readonly List<LightFlareSEffect> _flaresS = [];
+    private readonly List<TorchParticleLEffect> _particlesL = [];
+    private readonly List<TorchParticleMEffect> _particlesM = [];
+
+    private readonly List<TorchParticleSEffect> _particlesS = [];
+    private bool _activated = true;
+    private Color _color;
+    private bool _initialized;
+    private bool _mouseWasPressed;
+    private float _particleTimer;
+    private float _scale;
+    private TorchSize _size;
+    private Sprite2D _sprite = null!;
+
+    private float _x;
+    private float _y;
+
+    public static InteractableTorchEffect Create(float x, float y, TorchSize size = TorchSize.M)
+    {
+        var effect = new InteractableTorchEffect();
+        effect._x = x;
+        effect._y = y;
+        effect._size = size;
+        return effect;
+    }
+
+    public void Initialize()
+    {
+        if (_initialized) return;
+        _initialized = true;
+
+        var textureRegion = AtlasRegions.GetRegion(AtlasPath, "env/torch");
+        if (textureRegion == null) return;
+
+        _color = new Color(1f, 1f, 1f, 0.4f);
+
+        switch (_size)
+        {
+            case TorchSize.S:
+                _scale = 0.6f;
+                break;
+            case TorchSize.M:
+                _scale = 1.0f;
+                break;
+            case TorchSize.L:
+                _scale = 1.4f;
+                break;
+        }
+
+        var halfWidth = 960f;
+        var halfHeight = 568f;
+        var torchX = _x - halfWidth - 23f;
+        var torchY = halfHeight - _y;
+
+        var clickSize = new Vector2(50f, 60f);
+        Size = clickSize;
+        Position = new Vector2(torchX - clickSize.X / 2f, torchY - clickSize.Y / 2f);
+
+        _sprite = new Sprite2D();
+        _sprite.Texture = textureRegion.Value.Texture;
+        _sprite.RegionEnabled = true;
+        _sprite.RegionRect = textureRegion.Value.Region;
+        _sprite.Centered = true;
+        _sprite.Position = new Vector2(clickSize.X / 2f, clickSize.Y / 2f + 24f);
+        _sprite.Scale = new Vector2(_scale, _scale);
+        _sprite.Modulate = _color;
+        AddChild(_sprite);
+
+        GetTree().ProcessFrame += OnProcessFrame;
+    }
+
+    public override void _ExitTree()
+    {
+        if (_initialized) GetTree().ProcessFrame -= OnProcessFrame;
+        base._ExitTree();
+    }
+
+    private void OnProcessFrame()
+    {
+        if (!_initialized || !IsInsideTree()) return;
+
+        var delta = (float)GetProcessDeltaTime();
+
+        UpdateParticles();
+
+        var mouseDown = Input.IsMouseButtonPressed(MouseButton.Left);
+        if (mouseDown && !_mouseWasPressed)
+        {
+            var mousePos = GetViewport().GetMousePosition();
+            var globalRect = GetGlobalRect();
+            if (globalRect.HasPoint(mousePos) && IsCombatInFocus())
+            {
+                _activated = !_activated;
+
+                if (_activated)
+                    AFTPModAudio.Play("general", "fire_ignite", -10f, 0.4f);
+                else
+                    AFTPModAudio.Play("general", "torch_extinguish", -10f);
+            }
+        }
+
+        _mouseWasPressed = mouseDown;
+
+        if (_activated)
+        {
+            _particleTimer -= delta;
+            if (_particleTimer < 0f)
+            {
+                _particleTimer = ParticleEmitInterval;
+                SpawnParticles();
+            }
+        }
+    }
+
+    private bool IsCombatInFocus()
+    {
+        var hoveredControl = GetViewport().GuiGetHoveredControl();
+
+        // Nothing hovered = probably fine
+        if (hoveredControl == null)
+            return true;
+
+        // Walk up from the hovered control to see if it's inside an NCombatRoom
+        Node current = hoveredControl;
+        while (current != null)
+        {
+            if (current is NCombatRoom)
+                return true;
+            current = current.GetParent();
+        }
+
+        return false;
+    }
+
+    private void UpdateParticles()
+    {
+        for (var i = _particlesS.Count - 1; i >= 0; i--)
+        {
+            var particle = _particlesS[i];
+            if (particle.IsDone || !IsInstanceValid(particle))
+            {
+                if (IsInstanceValid(particle))
+                    particle.QueueFree();
+                _particlesS.RemoveAt(i);
+            }
+        }
+
+        for (var i = _flaresS.Count - 1; i >= 0; i--)
+        {
+            var flare = _flaresS[i];
+            if (flare.IsDone || !IsInstanceValid(flare))
+            {
+                if (IsInstanceValid(flare))
+                    flare.QueueFree();
+                _flaresS.RemoveAt(i);
+            }
+        }
+
+        for (var i = _particlesM.Count - 1; i >= 0; i--)
+        {
+            var particle = _particlesM[i];
+            if (particle.IsDone || !IsInstanceValid(particle))
+            {
+                if (IsInstanceValid(particle))
+                    particle.QueueFree();
+                _particlesM.RemoveAt(i);
+            }
+        }
+
+        for (var i = _flaresM.Count - 1; i >= 0; i--)
+        {
+            var flare = _flaresM[i];
+            if (flare.IsDone || !IsInstanceValid(flare))
+            {
+                if (IsInstanceValid(flare))
+                    flare.QueueFree();
+                _flaresM.RemoveAt(i);
+            }
+        }
+
+        for (var i = _particlesL.Count - 1; i >= 0; i--)
+        {
+            var particle = _particlesL[i];
+            if (particle.IsDone || !IsInstanceValid(particle))
+            {
+                if (IsInstanceValid(particle))
+                    particle.QueueFree();
+                _particlesL.RemoveAt(i);
+            }
+        }
+
+        for (var i = _flaresL.Count - 1; i >= 0; i--)
+        {
+            var flare = _flaresL[i];
+            if (flare.IsDone || !IsInstanceValid(flare))
+            {
+                if (IsInstanceValid(flare))
+                    flare.QueueFree();
+                _flaresL.RemoveAt(i);
+            }
+        }
+    }
+
+    private void SpawnParticles()
+    {
+        var particleX = _x;
+        var particleY = _y;
+
+        switch (_size)
+        {
+            case TorchSize.S:
+                particleY -= 10f;
+                var particleS = TorchParticleSEffect.Create(particleX, particleY, RenderGreen);
+                particleS.ZIndex = -1;
+                GetParent().AddChild(particleS);
+                _particlesS.Add(particleS);
+
+                var flareS = LightFlareSEffect.Create(particleX, particleY, RenderGreen);
+                flareS.ZIndex = -1;
+                GetParent().AddChild(flareS);
+                _flaresS.Add(flareS);
+                break;
+
+            case TorchSize.M:
+                var particleM = TorchParticleMEffect.Create(particleX, particleY, RenderGreen);
+                particleM.ZIndex = -1;
+                GetParent().AddChild(particleM);
+                _particlesM.Add(particleM);
+
+                var flareM = LightFlareMEffect.Create(particleX, particleY, RenderGreen);
+                flareM.ZIndex = -1;
+                GetParent().AddChild(flareM);
+                _flaresM.Add(flareM);
+                break;
+
+            case TorchSize.L:
+                particleY += 14f;
+                var particleL = TorchParticleLEffect.Create(particleX, particleY, RenderGreen);
+                particleL.ZIndex = -1;
+                GetParent().AddChild(particleL);
+                _particlesL.Add(particleL);
+
+                var flareL = LightFlareLEffect.Create(particleX, particleY, RenderGreen);
+                flareL.ZIndex = -1;
+                GetParent().AddChild(flareL);
+                _flaresL.Add(flareL);
+                break;
+        }
+    }
+}

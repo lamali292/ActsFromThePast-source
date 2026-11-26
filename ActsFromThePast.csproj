@@ -1,0 +1,151 @@
+﻿<Project Sdk="Godot.NET.Sdk/4.5.1">
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <LangVersion>14.0</LangVersion>
+        <ImplicitUsings>true</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <DefaultItemExcludes>$(DefaultItemExcludes);packages/**;ImageGen/**;tools/**;ActsFromThePast.Dread/**</DefaultItemExcludes>
+        <AppOutputBase>$(MSBuildProjectDirectory)\</AppOutputBase>
+        <PathMap>$(AppOutputBase)=.\</PathMap>
+        <GodotDisabledSourceGenerators>GodotPluginsInitializer</GodotDisabledSourceGenerators>
+    </PropertyGroup>
+
+    <!-- Machine-specific paths live in local.props (untracked, see local.props.example). The defaults below are the original author's. -->
+    <Import Project="local.props" Condition="Exists('local.props')"/>
+
+    <PropertyGroup>
+        <GodotPath Condition="'$(GodotPath)' == ''">/home/hex3/Documents/modding/STS2/MegaDot_v4.5.1-stable_mono_linux.x86_64</GodotPath>
+        <!-- Which game install to build against / deploy to / test with: beta or public.
+             Switch in local.props, or per build with -p:Sts2Branch=public. -->
+        <Sts2Branch Condition="'$(Sts2Branch)' == ''">beta</Sts2Branch>
+        <Sts2Path Condition="'$(Sts2Path)' == '' and '$(Sts2Branch)' == 'public'">$(Sts2PublicPath)</Sts2Path>
+        <Sts2Path Condition="'$(Sts2Path)' == '' and '$(Sts2Branch)' == 'beta'">$(Sts2BetaPath)</Sts2Path>
+        <Sts2Path Condition="'$(Sts2Path)' == ''">/home/hex3/.steam/steam/steamapps/common/Slay the Spire 2/</Sts2Path>
+        <ModsPath Condition="'$(ModsPath)' == ''">$(Sts2Path)/mods/</ModsPath>
+        <Sts2DataDir Condition="'$(Sts2DataDir)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">$(Sts2Path)/data_sts2_windows_x86_64</Sts2DataDir>
+        <Sts2DataDir Condition="'$(Sts2DataDir)' == ''">$(Sts2Path)/data_sts2_linuxbsd_x86_64</Sts2DataDir>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <NoWarn>$(NoWarn);MSB3270</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup Condition="Exists('$(Sts2DataDir)')">
+        <Reference Include="0Harmony">
+            <HintPath>$(Sts2DataDir)/0Harmony.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="sts2">
+            <HintPath>$(Sts2DataDir)/sts2.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+    </ItemGroup>
+
+    <!-- No game install (CI): compile against the published reference assemblies of the game instead. -->
+    <ItemGroup Condition="!Exists('$(Sts2DataDir)')">
+        <PackageReference Include="lamali.StS2.RefLib" Version="0.113.0" ExcludeAssets="runtime" PrivateAssets="all"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Publicize Include="sts2" IncludeVirtualMembers="false" IncludeCompilerGeneratedMembers="false"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Alchyr.Sts2.BaseLib" Version="3.4.8" PrivateAssets="All"/>
+        <AdditionalFiles Include="ActsFromThePast/localization/**/*.json"/>
+        <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" />
+        <PackageReference Include="Krafs.Publicizer" Version="2.3.2">
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+            <PrivateAssets>all</PrivateAssets>
+        </PackageReference>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Compile Remove="packages/**/*.uid"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Condition="Exists('Directory.Build.props')" Include="Directory.Build.props"/>
+        <None Include=".gitignore"/>
+        <None Condition="Exists('local.props')" Include="local.props"/>
+        <None Include="ActsFromThePast.json"/>
+        <None Include="project.godot"/>
+    </ItemGroup>
+
+    <!-- ActsFromThePastCode holds the C# source. ActsFromThePast holds the Godot assets: listed as None items only so Rider shows them, they are not built or copied. -->
+    <ItemGroup>
+        <None Include="ActsFromThePast/**/*;README.md;icon.svg;export_presets.cfg;nuget.config"
+              Exclude="**/*.cs;**/*.uid;**/*.import"/>
+    </ItemGroup>
+
+    <Target Name="UpdateDependencyVersions" BeforeTargets="BeforeBuild" Condition="Exists('.godot/mono/temp/obj/project.assets.json')">
+        <PropertyGroup>
+            <ManifestPath>$(MSBuildProjectName).json</ManifestPath>
+        </PropertyGroup>
+
+        <PropertyGroup>
+            <NuGetData>$([System.IO.File]::ReadAllText(".godot/mono/temp/obj/project.assets.json"))</NuGetData>
+            <ActiveBaseLibVersion>$([System.Text.RegularExpressions.Regex]::Match($(NuGetData), '"Alchyr.Sts2.BaseLib\/([^"]*)').Result('$1'))</ActiveBaseLibVersion>
+            <OldContent>$([System.IO.File]::ReadAllText($(ManifestPath)))</OldContent>
+            <NewContent>$([System.Text.RegularExpressions.Regex]::Replace($(OldContent), '("id":\s*"BaseLib",\s*"min_version":\s*")[^"]*', '${1}$(ActiveBaseLibVersion)'))</NewContent>
+        </PropertyGroup>
+
+        <WriteLinesToFile Condition="'$(OldContent)' != '$(NewContent)'" File="$(ManifestPath)" Lines="$(NewContent)" Overwrite="true" Encoding="UTF-8"/>
+
+        <Message Condition="'$(OldContent)' != '$(NewContent)'" Text="Updated BaseLib dependency version in mod manifest json to version $(BaseLibVersion)" Importance="high"/>
+    </Target>
+
+    <!-- The Dread-mode Dominions are a separate assembly (see ActsFromThePast.Dread/), built and deployed next to this dll.
+         ActsFromThePast.dll does not reference it; it is loaded at runtime, on game versions that have Dread mode only. -->
+    <Target Name="BuildDreadAssembly" AfterTargets="Build">
+        <MSBuild Projects="ActsFromThePast.Dread/ActsFromThePast.Dread.csproj" Properties="Configuration=$(Configuration)" />
+    </Target>
+
+    <Target Name="CopyToModsFolderOnBuild" AfterTargets="PostBuildEvent">
+        <Message Text="Copying .dll .pdb and .json to mods folder." Importance="high"/>
+        <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/"/>
+        <Copy SourceFiles="$(AssemblyName).json" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/"/>
+        <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/"/>
+    </Target>
+
+    <!-- Build also mirrors dll/pdb/manifest into the other configured branch's mods folder, so building against one
+         branch still leaves the other loadable (the mod is compiled once and must run unchanged on both). -->
+    <Target Name="MirrorToOtherBranchModsOnBuild" AfterTargets="CopyToModsFolderOnBuild">
+        <PropertyGroup>
+            <_MirrorBeta Condition="'$(Sts2BetaPath)' != '' and '$(Sts2BetaPath)' != '$(Sts2Path)' and Exists('$(Sts2BetaPath)')">$(Sts2BetaPath)/mods/$(MSBuildProjectName)/</_MirrorBeta>
+            <_MirrorPublic Condition="'$(Sts2PublicPath)' != '' and '$(Sts2PublicPath)' != '$(Sts2Path)' and Exists('$(Sts2PublicPath)')">$(Sts2PublicPath)/mods/$(MSBuildProjectName)/</_MirrorPublic>
+        </PropertyGroup>
+        <ItemGroup>
+            <_MirrorFile Include="$(TargetPath);$(AssemblyName).json"/>
+            <_MirrorFile Include="$(TargetDir)$(TargetName).pdb" Condition="Exists('$(TargetDir)$(TargetName).pdb')"/>
+        </ItemGroup>
+        <Copy SourceFiles="@(_MirrorFile)" DestinationFolder="$(_MirrorBeta)" Condition="'$(_MirrorBeta)' != ''" ContinueOnError="true"/>
+        <Copy SourceFiles="@(_MirrorFile)" DestinationFolder="$(_MirrorPublic)" Condition="'$(_MirrorPublic)' != ''" ContinueOnError="true"/>
+    </Target>
+
+    <Target Name="CopyQuickPck" AfterTargets="PackPck" Condition="Exists('$(PckPackerOutputPath)') And '$(PckPackerSkipped)' != 'true'">
+        <Message Text="Copying quick .pck to mods folder." Importance="high"/>
+        <Copy SourceFiles="$(PckPackerOutputPath)" DestinationFolder="$(ModsPath)/$(MSBuildProjectName)"/>
+    </Target>
+
+    <!-- The exported .pck is branch independent, so the other branch's mods folder gets the same one. -->
+    <Target Name="MirrorPckToOtherBranchOnPublish" AfterTargets="GodotPublish">
+        <PropertyGroup>
+            <_PckFile>$(ModsPath)$(MSBuildProjectName)/$(MSBuildProjectName).pck</_PckFile>
+        </PropertyGroup>
+        <Copy SourceFiles="$(_PckFile)" DestinationFolder="$(Sts2BetaPath)/mods/$(MSBuildProjectName)/"
+              Condition="Exists('$(_PckFile)') and '$(Sts2BetaPath)' != '' and '$(Sts2BetaPath)' != '$(Sts2Path)' and Exists('$(Sts2BetaPath)')" ContinueOnError="true"/>
+        <Copy SourceFiles="$(_PckFile)" DestinationFolder="$(Sts2PublicPath)/mods/$(MSBuildProjectName)/"
+              Condition="Exists('$(_PckFile)') and '$(Sts2PublicPath)' != '' and '$(Sts2PublicPath)' != '$(Sts2Path)' and Exists('$(Sts2PublicPath)')" ContinueOnError="true"/>
+    </Target>
+
+    <Target Name="NeedGodotForPublish" BeforeTargets="Publish">
+        <Error Text=" Godot path must be set up before publishing; Godot not found at path '$(GodotPath)'. Check Directory.Build.props file." Condition="'$(GodotPath)' == '' or !Exists('$(GodotPath)')"/>
+    </Target>
+
+    <Target Name="GodotPublish" AfterTargets="Publish" Condition="'$(GodotPath)' != '' and Exists('$(GodotPath)') and '$(IsInnerGodotExport)' != 'true'">
+        <Message Text="Exporting Godot .pck to mods folder" Importance="high"/>
+        <Exec Command="&quot;$(GodotPath)&quot; --headless --export-pack &quot;BasicExport&quot; &quot;$(ModsPath)$(MSBuildProjectName)/$(MSBuildProjectName).pck&quot;" EnvironmentVariables="IsInnerGodotExport=true;MSBUILDDISABLENODEREUSE=1" ContinueOnError="WarnAndContinue"/>
+    </Target>
+</Project>

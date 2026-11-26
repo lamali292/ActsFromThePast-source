@@ -1,0 +1,242 @@
+﻿using ActsFromThePast.Powers;
+using BaseLib.Abstracts;
+using Godot;
+using MegaCrit.Sts2.Core.Animation;
+using MegaCrit.Sts2.Core.Audio;
+using MegaCrit.Sts2.Core.Bindings.MegaSpine;
+using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Entities.Ascension;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
+using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Cards;
+using MegaCrit.Sts2.Core.Models.Powers;
+using MegaCrit.Sts2.Core.MonsterMoves.Intents;
+using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
+using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
+using MegaCrit.Sts2.Core.Random;
+
+namespace ActsFromThePast;
+
+public sealed class SpikeSlimeLarge : CustomMonsterModel
+{
+    private const int SlimedCount = 2;
+
+    private const string FLAME_TACKLE = "FLAME_TACKLE";
+    private const string LICK = "LICK";
+    private const string SPLIT = "SPLIT";
+
+    public int? OverrideHp
+    {
+        get;
+        set
+        {
+            AssertMutable();
+            field = value;
+        }
+    }
+
+    public override int MinInitialHp =>
+        OverrideHp ?? AscensionHelper.GetValueIfAscension(AscensionLevel.ToughEnemies, 67, 64);
+
+    public override int MaxInitialHp =>
+        OverrideHp ?? AscensionHelper.GetValueIfAscension(AscensionLevel.ToughEnemies, 73, 70);
+
+    private int FlameTackleDamage => AscensionHelper.GetValueIfAscension(AscensionLevel.DeadlyEnemies, 18, 16);
+    private int FrailTurns => AscensionHelper.GetValueIfAscension(AscensionLevel.DeadlyEnemies, 3, 2);
+
+    protected override string VisualsPath => "res://ActsFromThePast/monsters/spike_slime_large/spike_slime_large.tscn";
+
+    public override DamageSfxType TakeDamageSfxType => DamageSfxType.Slime;
+
+    public bool SplitTriggered
+    {
+        get;
+        set
+        {
+            AssertMutable();
+            field = value;
+        }
+    }
+
+    public MoveState SplitState { get; private set; } = null!;
+
+    public override async Task AfterAddedToRoom()
+    {
+        await base.AfterAddedToRoom();
+        await PowerCmd.Apply<SplitPower>(new BlockingPlayerChoiceContext(), Creature, 1m, Creature, null);
+    }
+
+    protected override MonsterMoveStateMachine GenerateMoveStateMachine()
+    {
+        var states = new List<MonsterState>();
+
+        var flameTackleState = new MoveState(
+            FLAME_TACKLE,
+            FlameTackle, new SingleAttackIntent(FlameTackleDamage), new StatusIntent(SlimedCount));
+
+        var lickState = new MoveState(
+            LICK,
+            Lick, new DebuffIntent());
+
+        SplitState = new MoveState(
+            SPLIT,
+            Split, new UnknownIntent());
+
+        var moveBranch = new ConditionalBranchState("MOVE_BRANCH", SelectNextMove);
+
+        flameTackleState.FollowUpState = moveBranch;
+        lickState.FollowUpState = moveBranch;
+        SplitState.FollowUpState = SplitState;
+
+        states.Add(flameTackleState);
+        states.Add(lickState);
+        states.Add(SplitState);
+        states.Add(moveBranch);
+
+        return new MonsterMoveStateMachine(states, moveBranch);
+    }
+
+    private string SelectNextMove(Creature owner, Rng rng, MonsterMoveStateMachine stateMachine)
+    {
+        if (SplitTriggered) return SPLIT;
+
+        var num = rng.NextInt(100);
+
+        if (num < 30)
+        {
+            if (LastTwoMoves(stateMachine, FLAME_TACKLE)) return LICK;
+            return FLAME_TACKLE;
+        }
+
+        if (LastMove(stateMachine, LICK)) return FLAME_TACKLE;
+        return LICK;
+    }
+
+    private static bool LastMove(MonsterMoveStateMachine stateMachine, string moveId)
+    {
+        var log = stateMachine.StateLog;
+        if (log.Count == 0) return false;
+        return log[log.Count - 1].Id == moveId;
+    }
+
+    private static bool LastTwoMoves(MonsterMoveStateMachine stateMachine, string moveId)
+    {
+        var log = stateMachine.StateLog;
+        if (log.Count < 2) return false;
+        return log[log.Count - 1].Id == moveId && log[log.Count - 2].Id == moveId;
+    }
+
+    private async Task FlameTackle(IReadOnlyList<Creature> targets)
+    {
+        await FastAttackAnimation.Play(Creature);
+
+        await DamageCmd.Attack(FlameTackleDamage)
+            .FromMonster(this)
+            .WithAttackerFx(sfx: "event:/sfx/enemy/enemy_attacks/twig_slime_s/twig_slime_s_attack")
+            .WithHitFx("vfx/vfx_slime_impact")
+            .Execute(null);
+
+        try
+        {
+            ClassicSlimedTracker.CreatingClassicSlimed = ActsFromThePastConfig.LegacyEnemiesGiveClassicSlimed;
+            await CardPileCmd.AddToCombatAndPreview<Slimed>(targets, PileType.Discard, SlimedCount, null);
+        }
+        finally
+        {
+            ClassicSlimedTracker.CreatingClassicSlimed = false;
+        }
+    }
+
+    private async Task Lick(IReadOnlyList<Creature> targets)
+    {
+        await FastAttackAnimation.Play(Creature);
+
+        foreach (var target in targets.Where(t => t.IsAlive))
+            await PowerCmd.Apply<FrailPower>(new BlockingPlayerChoiceContext(), target, FrailTurns, Creature, null);
+    }
+
+    private async Task Split(IReadOnlyList<Creature> targets)
+    {
+        var currentHp = Creature.CurrentHp;
+        var combatState = Creature.CombatState;
+        if (combatState == null) return;
+        var originalPosition = NCombatRoom.Instance?.GetCreatureNode(Creature)?.Position ?? Vector2.Zero;
+
+        _ = ShakeAnimation.Play(Creature, 1.0f, 3.0f);
+        await Cmd.Wait(1.0f);
+        AFTPModAudio.Play("general", "slime_split");
+        await CreatureCmd.Kill(Creature);
+
+        var occupiedSlots = combatState.GetTeammatesOf(Creature)
+            .Where(t => t.IsAlive)
+            .Select(t => t.SlotName)
+            .ToHashSet();
+
+        var slot1 = combatState.Encounter?.Slots?
+            .FirstOrDefault(s => s.StartsWith("spike_med") && !occupiedSlots.Contains(s));
+
+        string? slot2 = null;
+        if (slot1 != null)
+        {
+            occupiedSlots.Add(slot1);
+            slot2 = combatState.Encounter?.Slots?
+                .FirstOrDefault(s => s.StartsWith("spike_med") && !occupiedSlots.Contains(s));
+        }
+
+        var useSlots = slot1 != null && slot2 != null;
+
+        Queue<Vector2>? positionQueue = null;
+        var enemyContainer = NCombatRoom.Instance?.GetNode<Control>("%EnemyContainer");
+        Callable? callable = null;
+
+        if (!useSlots)
+        {
+            positionQueue = new Queue<Vector2>();
+
+            void OnChildEntered(Node child)
+            {
+                if (child is NCreature nc && positionQueue.Count > 0)
+                    nc.Position = positionQueue.Dequeue();
+            }
+
+            callable = Callable.From<Node>(OnChildEntered);
+            enemyContainer?.Connect(Node.SignalName.ChildEnteredTree, callable.Value);
+            positionQueue.Enqueue(originalPosition + new Vector2(-134f, Rng.Chaotic.NextFloat() * 8f - 4f));
+        }
+
+        var slime1 = (SpikeSlimeMedium)ModelDb.Monster<SpikeSlimeMedium>().ToMutable();
+        var creature1 = await CreatureCmd.Add(slime1, combatState, CombatSide.Enemy, slot1);
+        await CreatureCmd.SetMaxHp(creature1, currentHp);
+        await CreatureCmd.Heal(creature1, currentHp);
+
+        if (!useSlots)
+            positionQueue!.Enqueue(originalPosition + new Vector2(134f, Rng.Chaotic.NextFloat() * 8f - 4f));
+
+        var slime2 = (SpikeSlimeMedium)ModelDb.Monster<SpikeSlimeMedium>().ToMutable();
+        var creature2 = await CreatureCmd.Add(slime2, combatState, CombatSide.Enemy, slot2);
+        await CreatureCmd.SetMaxHp(creature2, currentHp);
+        await CreatureCmd.Heal(creature2, currentHp);
+
+        if (!useSlots && callable.HasValue)
+            enemyContainer?.Disconnect(Node.SignalName.ChildEnteredTree, callable.Value);
+    }
+
+    public override CreatureAnimator GenerateAnimator(MegaSprite controller)
+    {
+        var idle = new AnimState("idle", true);
+        var hit = new AnimState("hit");
+
+        hit.NextState = idle;
+
+        var animator = new CreatureAnimator(idle, controller);
+        animator.AddAnyState("Dead", new AnimState("Dead"));
+        animator.AddAnyState("Hit", hit);
+
+        return animator;
+    }
+}

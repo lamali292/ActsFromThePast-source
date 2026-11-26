@@ -1,0 +1,19 @@
+bin/
+obj/
+.idea/
+.godot/
+packages/
+*.user
+local.props
+
+*.uid
+*.import
+/fmod/.cache/
+/fmod/Build/
+
+# release.ps1
+/release.local.json
+/dist/
+
+# python
+__pycache__/

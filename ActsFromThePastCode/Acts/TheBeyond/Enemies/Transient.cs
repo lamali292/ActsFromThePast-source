@@ -1,0 +1,99 @@
+﻿using ActsFromThePast.Compatibility;
+using ActsFromThePast.Powers;
+using BaseLib.Abstracts;
+using MegaCrit.Sts2.Core.Animation;
+using MegaCrit.Sts2.Core.Bindings.MegaSpine;
+using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Entities.Ascension;
+using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
+using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
+
+namespace ActsFromThePast.Acts.TheBeyond.Enemies;
+
+public sealed class Transient : CustomMonsterModel
+{
+    private const int IncrementDmg = 10;
+
+    private const string ATTACK = "ATTACK";
+
+    private decimal _multiplayerDamageMultiplier = 1m;
+    public override int MinInitialHp => 999;
+    public override int MaxInitialHp => 999;
+
+    private int StartingDeathDmg => AscensionHelper.GetValueIfAscension(AscensionLevel.DeadlyEnemies, 40, 30);
+
+    protected override string VisualsPath => "res://ActsFromThePast/monsters/transient/transient.tscn";
+
+    private int Count
+    {
+        get;
+        set
+        {
+            AssertMutable();
+            field = value;
+        }
+    }
+
+    private int CurrentAttackDamage => (int)((StartingDeathDmg + Count * IncrementDmg) * _multiplayerDamageMultiplier);
+
+    public override async Task AfterAddedToRoom()
+    {
+        await base.AfterAddedToRoom();
+        await PowerCmd.Apply<FadingPower>(new BlockingPlayerChoiceContext(), Creature,
+            AscensionHelper.GetValueIfAscension(AscensionLevel.ToughEnemies, 6, 5), Creature, null);
+        await PowerCmd.Apply<ShiftingPower>(new BlockingPlayerChoiceContext(), Creature, 1, Creature, null);
+
+        if (Creature.CombatState is not { } combatState) return;
+        var playerCount = combatState.Players.Count;
+        if (playerCount > 1)
+            _multiplayerDamageMultiplier = playerCount
+                                           * GameApiCompat.GetMultiplayerScaling(
+                                               combatState.Encounter,
+                                               combatState.RunState.CurrentActIndex);
+    }
+
+    protected override MonsterMoveStateMachine GenerateMoveStateMachine()
+    {
+        var attackState = new MoveState(
+            ATTACK,
+            Attack,
+            new DynamicSingleAttackIntent(() => CurrentAttackDamage)
+        );
+
+        attackState.FollowUpState = attackState;
+
+        return new MonsterMoveStateMachine(
+            new List<MonsterState> { attackState },
+            attackState
+        );
+    }
+
+    private async Task Attack(IReadOnlyList<Creature> targets)
+    {
+        await CreatureCmd.TriggerAnim(Creature, "Swing", 0.4f);
+        await DamageCmd.Attack(CurrentAttackDamage)
+            .FromMonster(this)
+            .WithHitFx("vfx/vfx_starry_impact", tmpSfx: "blunt_attack.mp3")
+            .Execute(null);
+        Count++;
+    }
+
+    public override CreatureAnimator GenerateAnimator(MegaSprite controller)
+    {
+        var idle = new AnimState("Idle", true);
+        var attack = new AnimState("Attack");
+        var hurt = new AnimState("Hurt");
+
+        attack.NextState = idle;
+        hurt.NextState = idle;
+
+        var animator = new CreatureAnimator(idle, controller);
+        animator.AddAnyState("Dead", new AnimState("Dead"));
+        animator.AddAnyState("Swing", attack);
+        animator.AddAnyState("Hurt", hurt);
+
+        return animator;
+    }
+}

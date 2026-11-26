@@ -1,0 +1,11 @@
+<Project>
+    <PropertyGroup>
+        <GodotPath>C:\Users\lamal\Desktop\Programmieren\sts2mods\MegaDot\MegaDot_v4.5.1-stable_mono_win64_console.exe</GodotPath>
+
+        <!-- Which game install to build against / deploy to / test with: beta (0.113.1) or public (0.111.1).
+             Switch here, or per build with -p:Sts2Branch=public. -->
+        <Sts2Branch>beta</Sts2Branch>
+        <Sts2BetaPath>D:/SteamBranches/sts2-beta/Slay the Spire 2</Sts2BetaPath>
+        <Sts2PublicPath>D:/SteamBranches/sts2-public/Slay the Spire 2</Sts2PublicPath>
+    </PropertyGroup>
+</Project>

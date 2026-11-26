@@ -1,0 +1,125 @@
+﻿using ActsFromThePast.Compatibility;
+using ActsFromThePast.Interfaces;
+using ActsFromThePast.Minigames;
+using BaseLib.Abstracts;
+using MegaCrit.Sts2.Core.CardSelection;
+using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.Factories;
+using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Nodes.Screens.Map;
+using MegaCrit.Sts2.Core.Runs;
+
+namespace ActsFromThePast.Acts.TheBeyond.Events;
+
+public sealed class SecretPortal : AftpEventModel, IShrineEvent
+{
+
+    private const int MinRunTimeSeconds = 800;
+
+    public override bool IsShared => true;
+
+    public override ActModel[] Acts => [ModelDb.Act<TheBeyondAct>()];
+
+    bool IShrineEvent.IsOneTimeEvent => true;
+
+    public override bool IsAllowed(IRunState runState)
+    {
+        if (RunManager.Instance.RunTime <= MinRunTimeSeconds)
+            return false;
+        if (ActsFromThePastConfig.RebalancedMode && runState.Players.Count > 1)
+            return false;
+        return true;
+    }
+
+    public override void OnRoomEnter()
+    {
+        AFTPModAudio.Play("events", "secret_portal");
+    }
+
+    protected override IReadOnlyList<EventOption> GenerateInitialOptions()
+    {
+        if (ActsFromThePastConfig.RebalancedMode)
+            return
+            [
+                Option(Enter, "INITIAL_REBALANCED"),
+                Option(ReachIn, "INITIAL_REBALANCED")
+            ];
+
+        return
+        [
+            Option(Enter),
+            Option(Leave)
+        ];
+    }
+
+    private async Task Enter()
+    {
+        if (Owner == null) return;
+        if (ActsFromThePastConfig.RebalancedMode)
+        {
+            var concreteState = (RunState)Owner.RunState;
+            var map = Owner.RunState.Map;
+            var currentRow = Owner.RunState.CurrentMapCoord?.row ?? 0;
+            var availableNodes = map.GetRowCount() - 1 - currentRow;
+
+            var minigame = new PortalMapBuilderMinigame(Owner, Rng, availableNodes);
+            await minigame.PlayMinigame();
+
+            // Reset the map selection synchronizer
+            RunManager.Instance.MapSelectionSynchronizer.BeforeMapGenerated();
+
+            // Build compact map
+            var newMap = new PortalBuilderActMap(concreteState, minigame.Nodes, minigame.AvailableNodeCount);
+            Owner.RunState.Map = newMap;
+
+            // Clear stale coords and restore at new positions
+            concreteState.RemoveStaleVisitedMapCoords(newMap);
+            foreach (var coord in newMap.NewVisitedCoords)
+                concreteState.AddVisitedMapCoord(coord);
+
+            // Reset synchronizer to accept votes from the new location
+            RunManager.Instance.MapSelectionSynchronizer.OnLocationChanged(Owner.RunState.MapLocation);
+
+            // Refresh map screen
+            NMapScreen.Instance?.SetMap(newMap, Owner.RunState.Rng.Seed, true);
+
+            SetEventFinished(PageDescription("ENTER_REBALANCED"));
+            return;
+        }
+
+        SetEventState(PageDescription("ENTER"), [
+            new EventOption(this, TeleportToBoss,
+                $"{Id.Entry}.pages.ENTER.options.CONTINUE")
+        ]);
+    }
+
+    private Task TeleportToBoss()
+    {
+        if (Owner == null) return Task.CompletedTask;
+        var bossCoord = Owner.RunState.Map.BossMapPoint.coord;
+        TaskHelper.RunSafely(RunManager.Instance.EnterMapCoord(bossCoord));
+        return Task.CompletedTask;
+    }
+
+    private Task Leave()
+    {
+        SetEventFinished(PageDescription("LEAVE"));
+        return Task.CompletedTask;
+    }
+
+    private async Task ReachIn()
+    {
+        if (Owner == null) return;
+        var prefs = new CardSelectorPrefs(CardSelectorPrefs.TransformSelectionPrompt, 1);
+        foreach (var original in (await CardSelectCmd.FromDeckForTransformation(Owner, prefs)).ToList())
+        {
+            var transformed = CardFactory.CreateRandomCardForTransform(original, false, Owner.RunState.Rng.Niche);
+            CardCmd.Upgrade(transformed);
+            await CardCmd.Transform(original, transformed);
+        }
+
+        SetEventFinished(PageDescription("REACH_IN"));
+    }
+}

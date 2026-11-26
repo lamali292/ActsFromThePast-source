@@ -1,0 +1,357 @@
+﻿using BaseLib.Abstracts;
+using Godot;
+using MegaCrit.Sts2.Core.Animation;
+using MegaCrit.Sts2.Core.Bindings.MegaSpine;
+using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Entities.Ascension;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
+using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Cards;
+using MegaCrit.Sts2.Core.Models.Powers;
+using MegaCrit.Sts2.Core.MonsterMoves.Intents;
+using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
+using MegaCrit.Sts2.Core.Random;
+
+namespace ActsFromThePast.Acts.TheBeyond.Enemies;
+
+public sealed class Nemesis : CustomMonsterModel
+{
+    private const int ScytheDamage = 45;
+    private const int FireTimes = 3;
+    private const int BurnAmount = 5;
+    private const int ScytheCooldownTurns = 2;
+
+    private const string TRI_ATTACK = "TRI_ATTACK";
+    private const string SCYTHE = "SCYTHE";
+    private const string TRI_BURN = "TRI_BURN";
+
+    private bool _alive = true;
+    private SceneTreeTimer _fireTimer = null!;
+
+    private Tween _opacityTween = null!;
+
+    public override int MinInitialHp => AscensionHelper.GetValueIfAscension(AscensionLevel.ToughEnemies, 200, 185);
+    public override int MaxInitialHp => AscensionHelper.GetValueIfAscension(AscensionLevel.ToughEnemies, 200, 185);
+
+    private int FireDamage => AscensionHelper.GetValueIfAscension(AscensionLevel.DeadlyEnemies, 7, 6);
+
+    protected override string VisualsPath => "res://ActsFromThePast/monsters/nemesis/nemesis.tscn";
+
+    private bool ShouldApplyIntangible
+    {
+        get;
+        set
+        {
+            AssertMutable();
+            field = value;
+        }
+    }
+
+    private bool FirstMove
+    {
+        get;
+        set
+        {
+            AssertMutable();
+            field = value;
+        }
+    } = true;
+
+    private int ScytheCooldown
+    {
+        get;
+        set
+        {
+            AssertMutable();
+            field = value;
+        }
+    }
+
+    public override async Task AfterAddedToRoom()
+    {
+        await base.AfterAddedToRoom();
+        Creature.Died += OnDeath;
+        StartFireLoop();
+    }
+
+    private void OnDeath(Creature _)
+    {
+        Creature.Died -= OnDeath;
+        _alive = false;
+    }
+
+    private void StartFireLoop()
+    {
+        var creatureNode = NCombatRoom.Instance?.GetCreatureNode(Creature);
+        var spineBody = creatureNode?.Visuals?.SpineBody;
+        if (spineBody == null || creatureNode == null) return;
+
+        var bones = new[] { "eye0", "eye1", "eye2" }
+            .Select(name => SpineBones.Find(spineBody, name))
+            .OfType<GodotObject>()
+            .ToArray();
+
+        if (bones.Length == 0) return;
+
+        if (Engine.GetMainLoop() is not SceneTree tree) return;
+
+        SpawnFireParticles(creatureNode, bones, tree);
+    }
+
+    private void SpawnFireParticles(object creatureNode, GodotObject[] bones, SceneTree tree)
+    {
+        if (!_alive) return;
+        try
+        {
+            var globalPos = ((dynamic)creatureNode).GlobalPosition;
+            foreach (var bone in bones)
+            {
+                var boneX = (float)bone.Call("get_world_x");
+                var boneY = (float)bone.Call("get_world_y");
+                var firePos = new Vector2(
+                    globalPos.X + boneX * 1.1f + 10f,
+                    globalPos.Y + boneY * 1.1f + 10f
+                );
+                var effect = NemesisFireParticle.Create(firePos);
+                NCombatRoom.Instance?.CombatVfxContainer?.AddChildSafely(effect);
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Info($"[Nemesis] Fire particle error: {e.Message}");
+        }
+
+        _fireTimer = tree.CreateTimer(0.05f);
+        _fireTimer.Connect("timeout", Callable.From(() => SpawnFireParticles(creatureNode, bones, tree)));
+    }
+
+    public override Task AfterPowerAmountChanged(
+        PlayerChoiceContext choiceContext,
+        PowerModel power,
+        decimal amount,
+        Creature? applier,
+        CardModel? cardSource)
+    {
+        if (power is IntangiblePower && power.Owner == Creature)
+        {
+            var targetAlpha = amount > 0 ? 0.5f : 1.0f;
+            UpdateOpacity(targetAlpha);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private void UpdateOpacity(float targetAlpha)
+    {
+        var creatureNode = NCombatRoom.Instance?.GetCreatureNode(Creature);
+        var body = creatureNode?.Visuals?.GetCurrentBody();
+        if (body == null || creatureNode == null) return;
+
+        _opacityTween?.Kill();
+        _opacityTween = creatureNode.CreateTween();
+        var c = body.Modulate;
+        _opacityTween.TweenProperty(body, "modulate",
+                new Color(c.R, c.G, c.B, targetAlpha), 0.35f)
+            .SetEase(Tween.EaseType.InOut)
+            .SetTrans(Tween.TransitionType.Sine);
+    }
+
+
+    protected override MonsterMoveStateMachine GenerateMoveStateMachine()
+    {
+        var triAttackState = new MoveState(
+            TRI_ATTACK,
+            TriAttack, new MultiAttackIntent(FireDamage, FireTimes));
+        var scytheState = new MoveState(
+            SCYTHE,
+            Scythe, new SingleAttackIntent(ScytheDamage));
+        var triBurnState = new MoveState(
+            TRI_BURN,
+            TriBurn, new StatusIntent(5));
+
+        var moveBranch = new ConditionalBranchState("MOVE_BRANCH", SelectNextMove);
+
+        triAttackState.FollowUpState = moveBranch;
+        scytheState.FollowUpState = moveBranch;
+        triBurnState.FollowUpState = moveBranch;
+
+        return new MonsterMoveStateMachine(
+            new List<MonsterState> { triAttackState, scytheState, triBurnState, moveBranch },
+            moveBranch
+        );
+    }
+
+    private string SelectNextMove(Creature owner, Rng rng, MonsterMoveStateMachine stateMachine)
+    {
+        ScytheCooldown--;
+
+        if (FirstMove)
+        {
+            FirstMove = false;
+            return rng.NextInt(100) < 50 ? TRI_ATTACK : TRI_BURN;
+        }
+
+        var num = rng.NextInt(100);
+
+        if (num < 30)
+        {
+            if (!LastMove(stateMachine, SCYTHE) && ScytheCooldown <= 0)
+            {
+                ScytheCooldown = ScytheCooldownTurns;
+                return SCYTHE;
+            }
+
+            if (rng.NextFloat() < 0.5f)
+            {
+                if (!LastTwoMoves(stateMachine, TRI_ATTACK))
+                    return TRI_ATTACK;
+                return TRI_BURN;
+            }
+
+            if (!LastMove(stateMachine, TRI_BURN))
+                return TRI_BURN;
+            return TRI_ATTACK;
+        }
+
+        if (num < 65)
+        {
+            if (!LastTwoMoves(stateMachine, TRI_ATTACK))
+                return TRI_ATTACK;
+            if (rng.NextFloat() < 0.5f)
+            {
+                if (ScytheCooldown <= 0)
+                {
+                    ScytheCooldown = ScytheCooldownTurns;
+                    return SCYTHE;
+                }
+
+                return TRI_BURN;
+            }
+
+            return TRI_BURN;
+        }
+
+        if (!LastMove(stateMachine, TRI_BURN))
+            return TRI_BURN;
+        if (rng.NextFloat() < 0.5f && ScytheCooldown <= 0)
+        {
+            ScytheCooldown = ScytheCooldownTurns;
+            return SCYTHE;
+        }
+
+        return TRI_ATTACK;
+    }
+
+    private static bool LastMove(MonsterMoveStateMachine stateMachine, string moveId)
+    {
+        var log = stateMachine.StateLog;
+        if (log.Count == 0) return false;
+        return log[log.Count - 1].Id == moveId;
+    }
+
+    private static bool LastTwoMoves(MonsterMoveStateMachine stateMachine, string moveId)
+    {
+        var log = stateMachine.StateLog;
+        if (log.Count < 2) return false;
+        return log[log.Count - 1].Id == moveId && log[log.Count - 2].Id == moveId;
+    }
+
+    private async Task TriAttack(IReadOnlyList<Creature> targets)
+    {
+        for (var i = 0; i < FireTimes; i++)
+            await DamageCmd.Attack(FireDamage)
+                .FromMonster(this)
+                .WithAttackerFx(sfx: "event:/sfx/characters/necrobinder/necrobinder_attack")
+                .WithHitFx("vfx/vfx_attack_blunt")
+                .Execute(null);
+    }
+
+    private async Task Scythe(IReadOnlyList<Creature> targets)
+    {
+        PlayScytheSfx();
+        await CreatureCmd.TriggerAnim(Creature, "Slash", 0.4f);
+        await DamageCmd.Attack(ScytheDamage)
+            .FromMonster(this)
+            .WithAttackerFx(sfx: "event:/sfx/characters/necrobinder/necrobinder_attack")
+            .WithHitFx("vfx/vfx_attack_slash")
+            .Execute(null);
+    }
+
+    private async Task TriBurn(IReadOnlyList<Creature> targets)
+    {
+        AFTPModAudio.Play("nemesis", "nemesis_talk_3");
+        var creatureNode = NCombatRoom.Instance?.GetCreatureNode(Creature);
+        if (creatureNode != null)
+            ShockWaveEffect.PlayChaotic(creatureNode.VfxSpawnPosition);
+        await Cmd.Wait(1.5f);
+
+        var player = Creature.CombatState?.Players.FirstOrDefault();
+        if (player != null)
+        {
+            var results = new List<CardPileAddResult>();
+            await CardPileCmd.AddToCombatAndPreview<Burn>(targets, PileType.Discard, BurnAmount, null);
+            CardCmd.PreviewCardPileAdd(results, 2f);
+        }
+    }
+
+    public override async Task AfterSideTurnEnd(
+        PlayerChoiceContext choiceContext,
+        CombatSide side,
+        IEnumerable<Creature> participants)
+    {
+        if (!participants.Contains(Creature))
+            return;
+
+        ShouldApplyIntangible = !ShouldApplyIntangible;
+
+        if (ShouldApplyIntangible)
+            await PowerCmd.Apply<IntangiblePower>(choiceContext, Creature, 1, Creature, null);
+        else if (Creature.HasPower<IntangiblePower>()) await PowerCmd.Remove(Creature.GetPower<IntangiblePower>());
+    }
+
+    private void PlayScytheSfx()
+    {
+        var roll = Rng.Chaotic.NextInt(2);
+        var sfxName = roll == 0 ? "nemesis_talk_1" : "nemesis_talk_2";
+        AFTPModAudio.Play("nemesis", sfxName);
+    }
+
+    private void PlayDeathSfx()
+    {
+        var roll = Rng.Chaotic.NextInt(2);
+        var sfxName = roll == 0 ? "nemesis_death_1" : "nemesis_death_2";
+        AFTPModAudio.Play("nemesis", sfxName);
+    }
+
+    public override async Task BeforeDeath(Creature creature)
+    {
+        await base.BeforeDeath(creature);
+        if (creature != Creature)
+            return;
+        PlayDeathSfx();
+    }
+
+    public override CreatureAnimator GenerateAnimator(MegaSprite controller)
+    {
+        var idle = new AnimState("Idle", true);
+        var attack = new AnimState("Attack");
+        var hit = new AnimState("Hit");
+
+        attack.NextState = idle;
+        hit.NextState = idle;
+
+        var animator = new CreatureAnimator(idle, controller);
+        animator.AddAnyState("Dead", new AnimState("Dead"));
+        animator.AddAnyState("Slash", attack);
+        animator.AddAnyState("Hit", hit);
+        controller.GetAnimationState().SetTimeScale(0.8f);
+
+        return animator;
+    }
+}
